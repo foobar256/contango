@@ -19,7 +19,7 @@ const indexes = [
     { name: 'S&P 500', spot: '^GSPC', futuresPrefix: 'ES' },
     { name: 'Nasdaq 100', spot: '^NDX', futuresPrefix: 'NQ' },
     { name: 'Dow Jones', spot: '^DJI', futuresPrefix: 'YM' },
-    { name: 'Nikkei 225', spot: '^N225', futuresPrefix: 'NIY' },
+    { name: 'Nikkei 225', spot: '^N225', futuresPrefix: 'NK225' },
     { name: 'Russell 2000', spot: '^RUT', futuresPrefix: 'RTY' },
     { name: 'Micro Russell 2000', spot: '^RUT', futuresPrefix: 'M2K' }
 ];
@@ -33,7 +33,7 @@ const contractMonths = [
 
 async function calculateContango() {
     const table = new Table({
-        head: ['Index', 'Contract', 'Spot', 'Future', 'Basis %', 'Annualized %', 'Days'],
+        head: ['Index', 'Contract', 'Symbol', 'Spot', 'Future', 'Basis %', 'Spread %', 'Annual %', 'Days'],
         style: { head: ['cyan'] }
     });
 
@@ -44,6 +44,9 @@ async function calculateContango() {
         try {
             const spotQuote = await yahooFinance.quote(index.spot);
             const spotPrice = spotQuote.regularMarketPrice;
+            let frontMonthPrice = null;
+
+            const results = [];
 
             for (const { month, code } of contractMonths) {
                 // Determine year
@@ -53,13 +56,22 @@ async function calculateContango() {
                 }
 
                 const yearSuffix = year.toString().slice(-2);
-                // Standard Yahoo format for specific futures is ES=F for front, 
-                // but specific months can be ESH26.CME or ESM26.CME
-                const symbolsToTry = [
-                    `${index.futuresPrefix}${code}${yearSuffix}.CME`,
-                    `${index.futuresPrefix}${code}${yearSuffix}`,
-                    `${index.futuresPrefix}=F` // fallback to front month if we are just testing
-                ];
+                
+                // Specific symbols for this contract
+                let symbolsToTry = [];
+                if (index.name === 'Nikkei 225') {
+                    symbolsToTry = [
+                        `NK225${code}${yearSuffix}.OS`,
+                        `NIY${code}${yearSuffix}.CME`,
+                        `NK${code}${yearSuffix}.CME`
+                    ];
+                } else {
+                    symbolsToTry = [
+                        `${index.futuresPrefix}${code}${yearSuffix}.CME`,
+                        `${index.futuresPrefix}${code}${yearSuffix}.CBOT`,
+                        `${index.futuresPrefix}${code}${yearSuffix}`
+                    ];
+                }
 
                 let futureQuote = null;
                 let usedSymbol = '';
@@ -72,9 +84,20 @@ async function calculateContango() {
                             usedSymbol = sym;
                             break;
                         }
-                    } catch (e) {
-                        // ignore and try next
-                    }
+                    } catch (e) {}
+                }
+
+                if (!futureQuote && month === contractMonths.find(m => 
+                    m.month > now.getMonth() || (m.month === now.getMonth() && now.getDate() <= getThirdFriday(currentYear, m.month).getDate())
+                )?.month) {
+                    const fallbackSym = `${index.futuresPrefix}=F`;
+                    try {
+                        const q = await yahooFinance.quote(fallbackSym);
+                        if (q && q.regularMarketPrice) {
+                            futureQuote = q;
+                            usedSymbol = fallbackSym;
+                        }
+                    } catch (e) {}
                 }
 
                 if (futureQuote) {
@@ -84,22 +107,27 @@ async function calculateContango() {
 
                     if (daysToExpiry <= 0) continue;
 
+                    if (frontMonthPrice === null) frontMonthPrice = futurePrice;
+
                     const basis = (futurePrice - spotPrice) / spotPrice;
+                    const spread = (futurePrice - frontMonthPrice) / frontMonthPrice;
                     const annualized = (Math.pow(1 + basis, 365 / daysToExpiry) - 1) * 100;
 
-                    table.push([
+                    results.push([
                         index.name,
                         `${code}${yearSuffix}`,
+                        usedSymbol,
                         spotPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
                         futurePrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
                         (basis * 100).toFixed(2) + '%',
+                        (spread * 100).toFixed(2) + '%',
                         (annualized >= 0 ? '+' : '') + annualized.toFixed(2) + '%',
                         daysToExpiry
                     ]);
-                    
-                    // If we found a specific month, we stop searching for other variants of the same month
                 }
             }
+
+            results.forEach(row => table.push(row));
         } catch (error) {
             console.error(`Error processing ${index.name}: ${error.message}`);
         }
